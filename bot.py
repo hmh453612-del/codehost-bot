@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-🚀 Telegram Free Code Hosting & Bot Runner Platform
-================================================================================
-Developer: Expert Telegram Platform Architect
-Features:
- - Multi-runtime Support (Python & Node.js Bot Runner)
- - Isolated Process Sandbox & Log Streaming
- - One Active Bot Per User Enforcement
- - Fraud-protected Referral System (+30 Points)
- - Manual Deposit System (bKash / Nagad / Rocket) with Admin Verification
- - Real-time Logs, Process Control (Start/Stop/Restart/Delete)
- - Admin Control Panel (User Manager, Balance Editor, Broadcast, Support Tickets)
- - Built-in Aiohttp Healthcheck Server for 24/7 Render Hosting
+🚀 Telegram Free Code Hosting & Bot Runner Platform (Render & VPS Ready)
 ================================================================================
 """
 
 import os
 import sys
-import time
 import shutil
 import asyncio
 import logging
@@ -61,16 +49,13 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "hosting_bot.db")
 BOTS_BASE_DIR = os.getenv("BOTS_BASE_DIR", "/tmp/hosted_bots")
 PORT = int(os.getenv("PORT", 8080))
 
-# Logging Configuration
 logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("CodeHostBot")
 
-# In-Memory State Tracker for Multi-step Interactions
 USER_STATES = {}
-# Active subprocess dictionary: { bot_db_id: psutil.Popen }
 RUNNING_PROCESSES = {}
 
 # ------------------------------------------------------------------------------
@@ -81,7 +66,6 @@ async def init_db():
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
         
-        # Users Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +81,6 @@ async def init_db():
             );
         """)
 
-        # Bots Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +95,6 @@ async def init_db():
             );
         """)
 
-        # Deposits Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS deposits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,12 +105,12 @@ async def init_db():
                 transaction_id TEXT UNIQUE NOT NULL,
                 status TEXT DEFAULT 'pending',
                 rejection_reason TEXT,
+                admin_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(telegram_id)
             );
         """)
 
-        # Support Tickets
         await db.execute("""
             CREATE TABLE IF NOT EXISTS support_tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,7 +122,6 @@ async def init_db():
             );
         """)
 
-        # System Settings
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -148,7 +129,6 @@ async def init_db():
             );
         """)
 
-        # Default Settings Seeding
         default_settings = [
             ("referral_points", str(DEFAULT_REFERRAL_POINTS)),
             ("bot_cost", str(DEFAULT_BOT_COST)),
@@ -163,7 +143,6 @@ async def init_db():
         await db.commit()
     logger.info("Database schema initialized successfully.")
 
-# Helper Settings Get/Set
 async def get_setting(key: str, default: str = "") -> str:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cur:
@@ -189,7 +168,7 @@ def get_main_keyboard(user_id: int):
         buttons.append([KeyboardButton("⚙️ Admin Panel")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def get_back_inline(callback_data: str = "menu_main"):
+def get_back_inline(callback_data: str = "cancel_action"):
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=callback_data)]])
 
 # ------------------------------------------------------------------------------
@@ -211,14 +190,11 @@ class BotRunner:
         if not os.path.exists(file_path):
             return False, f"Main file `{main_file}` missing in project folder."
 
-        # Stop already running process if any
         await BotRunner.stop_bot(bot_id)
 
-        # Build command based on runtime
         if runtime.lower() == "python":
             req_path = os.path.join(user_dir, "requirements.txt")
             if os.path.exists(req_path):
-                # Install requirements locally for this user sandbox
                 try:
                     proc_install = await asyncio.create_subprocess_exec(
                         sys.executable, "-m", "pip", "install", "-r", req_path,
@@ -227,7 +203,7 @@ class BotRunner:
                     )
                     await proc_install.communicate()
                 except Exception as e:
-                    logger.error(f"Error installing requirements for user {user_id}: {e}")
+                    logger.error(f"Error installing requirements: {e}")
 
             cmd = [sys.executable, "-u", main_file]
         elif runtime.lower() == "node":
@@ -242,11 +218,11 @@ class BotRunner:
                     )
                     await proc_install.communicate()
                 except Exception as e:
-                    logger.error(f"Error npm install for user {user_id}: {e}")
+                    logger.error(f"Error npm install: {e}")
 
             cmd = ["node", main_file]
         else:
-            return False, "Unsupported runtime selected."
+            return False, "Unsupported runtime."
 
         try:
             log_fd = open(log_file_path, "a", encoding="utf-8")
@@ -283,7 +259,6 @@ class BotRunner:
                     return False
                 stored_pid, user_id = row
 
-        # Check in-memory process map or PID
         proc = RUNNING_PROCESSES.pop(bot_id, None)
         if proc:
             try:
@@ -342,51 +317,44 @@ class BotRunner:
             try:
                 shutil.rmtree(user_dir)
             except Exception as e:
-                logger.error(f"Error removing user bot folder {user_dir}: {e}")
+                logger.error(f"Error removing user directory: {e}")
 
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("DELETE FROM bots WHERE id = ?", (bot_id,))
             await db.commit()
 
 # ------------------------------------------------------------------------------
-# 5. USER REGISTRATION & /start HANDLER
+# 5. USER /start & REGISTRATION
 # ------------------------------------------------------------------------------
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
 
-    # Check Maintenance
     m_mode = await get_setting("maintenance_mode", "0")
     if m_mode == "1" and user.id != ADMIN_ID:
-        await update.message.reply_html(
-            "<b>🔧 Maintenance Mode Active</b>\n\n"
-            "Server is currently undergoing scheduled maintenance. "
-            "Please check back in a few minutes."
-        )
+        await update.effective_message.reply_html("<b>🔧 Bot is under maintenance. Please try again later.</b>")
         return
 
     ref_by = None
     args = context.args
     if args and len(args) > 0 and args[0].startswith("ref_"):
         try:
-            ref_id_candidate = int(args[0].split("_")[1])
-            if ref_id_candidate != user.id:
-                ref_by = ref_id_candidate
+            candidate = int(args[0].split("_")[1])
+            if candidate != user.id:
+                ref_by = candidate
         except ValueError:
             pass
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Check if user exists
         async with db.execute("SELECT id, is_banned FROM users WHERE telegram_id = ?", (user.id,)) as cur:
             user_row = await cur.fetchone()
 
         if user_row:
             if user_row[1] == 1:
-                await update.message.reply_html("<b>🚫 Your account has been suspended by Admin.</b>")
+                await update.effective_message.reply_html("<b>🚫 Your account is suspended.</b>")
                 return
         else:
-            # Create user
             ref_reward = int(await get_setting("referral_points", str(DEFAULT_REFERRAL_POINTS)))
             await db.execute(
                 """
@@ -397,7 +365,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await db.commit()
 
-            # Credit Referrer if valid
             if ref_by:
                 async with db.execute("SELECT telegram_id FROM users WHERE telegram_id = ?", (ref_by,)) as cur:
                     referrer = await cur.fetchone()
@@ -410,7 +377,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         await context.bot.send_message(
                             chat_id=ref_by,
-                            text=f"<b>🎁 New Referral!</b>\n\nUser <b>{user.first_name}</b> joined using your link!\n"
+                            text=f"<b>🎁 New Referral!</b>\n\nUser <b>{user.first_name}</b> joined with your link!\n"
                                  f"💎 You earned <b>+{ref_reward} Points</b>.",
                             parse_mode=ParseMode.HTML,
                         )
@@ -423,21 +390,20 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_msg = (
         "<b>🚀 Welcome to CodeHost Bot</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "💻 Run your own Telegram Bots effortlessly\n"
+        "💻 Run your own Telegram Bots 24/7\n"
         "🟢 <b>Node.js Support</b>\n"
         "🐍 <b>Python 3 Support</b>\n"
-        "⚡ Fast & Isolated Deployment\n"
-        "📊 Real-time Console & Status\n\n"
+        "⚡ Fast & Isolated Execution\n"
+        "📊 Live Logs & Console Status\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎁 Referral Reward: <b>{ref_pts} Points</b>\n"
-        f"🤖 Bot Hosting Slot: <b>{bot_pts} Points</b>\n\n"
-        "💡 <i>Invite friends, accumulate points, and host your bots 24/7.</i>\n\n"
-        "👇 <b>Select an option from the menu below:</b>"
+        f"🤖 Bot Slot Cost: <b>{bot_pts} Points</b>\n\n"
+        "👇 <b>Select an option from the menu:</b>"
     )
-    await update.message.reply_html(welcome_msg, reply_markup=get_main_keyboard(user.id))
+    await update.effective_message.reply_html(welcome_msg, reply_markup=get_main_keyboard(user.id))
 
 # ------------------------------------------------------------------------------
-# 6. ACCOUNT, REFERRAL & POINTS VIEWS
+# 6. ACCOUNT & REFERRAL HANDLERS
 # ------------------------------------------------------------------------------
 async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -454,7 +420,7 @@ async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = await cur.fetchone()
 
     if not row:
-        await update.message.reply_text("Please send /start first.")
+        await update.effective_message.reply_text("Please send /start first.")
         return
 
     points, refs, joined, active_bots, total_dep = row
@@ -472,7 +438,7 @@ async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 <b>Joined:</b> {joined_date}\n\n"
         "━━━━━━━━━━━━━━━━━━"
     )
-    await update.message.reply_html(text)
+    await update.effective_message.reply_html(text)
 
 async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -481,7 +447,7 @@ async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute("SELECT referral_count, points FROM users WHERE telegram_id = ?", (user_id,)) as cur:
+        async with db.execute("SELECT referral_count FROM users WHERE telegram_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
 
     ref_count = row[0] if row else 0
@@ -491,17 +457,17 @@ async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🎁 Referral Program</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 <b>Total Referrals:</b> <code>{ref_count}</code>\n"
-        f"💎 <b>Estimated Earned:</b> <code>{earned}</code> Points\n\n"
+        f"💎 <b>Earned Points:</b> <code>{earned}</code> Points\n\n"
         f"🎯 <b>Per Valid Referral:</b> <b>+{ref_pts} Points</b>\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "🔗 <b>Your Personal Referral Link:</b>\n"
+        "🔗 <b>Your Referral Link:</b>\n"
         f"<code>{ref_link}</code>\n\n"
-        "💡 <i>Share this link with your friends to earn points instantly!</i>"
+        "💡 <i>Share this link to earn free points!</i>"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?url={ref_link}&text=Join%20CodeHost%20Bot%20to%20host%20your%20Telegram%20bots%20for%20free!")]
+        [InlineKeyboardButton("📤 Share Link", url=f"https://t.me/share/url?url={ref_link}&text=Host%20your%20Telegram%20Bot%20for%20Free!")]
     ])
-    await update.message.reply_html(text, reply_markup=kb)
+    await update.effective_message.reply_html(text, reply_markup=kb)
 
 async def points_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -517,18 +483,18 @@ async def points_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 <b>Current Balance:</b> <b>{pts} Points</b>\n"
         f"🤖 <b>Bot Deployment Cost:</b> <b>{bot_cost} Points</b>\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "📌 <i>Ways to get Points:</i>\n"
-        "1. 🎁 Invite friends via <b>Referral Link</b>\n"
-        "2. 💰 <b>Deposit</b> via bKash / Nagad / Rocket\n"
+        "📌 <i>How to get points:</i>\n"
+        "1. 🎁 Invite friends (Referral Link)\n"
+        "2. 💰 Deposit via bKash / Nagad / Rocket\n"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 Deposit Points", callback_data="btn_deposit"),
          InlineKeyboardButton("🎁 Refer Friends", callback_data="btn_referral")]
     ])
-    await update.message.reply_html(text, reply_markup=kb)
+    await update.effective_message.reply_html(text, reply_markup=kb)
 
 # ------------------------------------------------------------------------------
-# 7. DEPOSIT SYSTEM (BKASH, NAGAD, ROCKET & ADMIN APPROVAL)
+# 7. DEPOSIT FLOW
 # ------------------------------------------------------------------------------
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bkash = await get_setting("bkash_number", BKASH_NUMBER)
@@ -543,9 +509,9 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🟠 <b>Nagad:</b> <code>{nagad}</code>\n"
         f"🔵 <b>Rocket:</b> <code>{rocket}</code>\n\n"
         "💵 <b>Rate:</b> ৳1 = 1 Point\n"
-        "⚠️ <i>Send Money করার পর আপনার Transaction ID সাবমিট করুন।</i>\n\n"
+        "⚠️ <i>Send Money করার পর Transaction ID সাবমিট করুন।</i>\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "👇 <b>Select your payment method below:</b>"
+        "👇 <b>Select payment method:</b>"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💚 bKash", callback_data="dep_method_bKash"),
@@ -556,7 +522,7 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        await update.message.reply_html(text, reply_markup=kb)
+        await update.effective_message.reply_html(text, reply_markup=kb)
 
 async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -575,8 +541,7 @@ async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")]
         ])
         await query.edit_message_text(
-            f"<b>Payment Method:</b> <b>{method}</b>\n\n"
-            f"Please select or enter the deposit amount:",
+            f"<b>Payment Method:</b> <b>{method}</b>\n\nSelect deposit amount:",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
         )
@@ -586,61 +551,55 @@ async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amt_str == "custom":
             USER_STATES[query.from_user.id]["state"] = "AWAITING_DEP_CUSTOM_AMOUNT"
             await query.edit_message_text(
-                "✍️ <b>Enter Custom Amount (in BDT):</b>\n\n"
-                "Example: <code>150</code>",
+                "✍️ <b>Enter Custom Amount (in BDT):</b>\n\nExample: <code>150</code>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_back_inline("menu_deposit")
+                reply_markup=get_back_inline("btn_deposit")
             )
         else:
             amount = float(amt_str)
             USER_STATES[query.from_user.id]["amount"] = amount
             USER_STATES[query.from_user.id]["state"] = "AWAITING_DEP_TRX"
             await query.edit_message_text(
-                f"💵 <b>Selected Amount:</b> ৳{amount}\n"
+                f"💵 <b>Selected:</b> ৳{amount}\n"
                 f"💳 <b>Method:</b> {USER_STATES[query.from_user.id]['method']}\n\n"
-                "🧾 <b>Please send your Transaction ID (TrxID):</b>\n"
-                "Example: <code>8A7B6C5D</code>",
+                "🧾 <b>Please send your Transaction ID (TrxID):</b>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_back_inline("menu_deposit")
+                reply_markup=get_back_inline("btn_deposit")
             )
 
 # ------------------------------------------------------------------------------
-# 8. BOT DEPLOYMENT & PROJECT MANAGEMENT
+# 8. BOT DEPLOYMENT & MANAGEMENT
 # ------------------------------------------------------------------------------
 async def deploy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    # Maintenance Check
     m_mode = await get_setting("maintenance_mode", "0")
     if m_mode == "1" and user_id != ADMIN_ID:
-        await update.message.reply_html("<b>🔧 Bot deployment is temporarily paused for maintenance.</b>")
+        await update.effective_message.reply_html("<b>🔧 Bot deployment is temporarily paused.</b>")
         return
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute("SELECT points FROM users WHERE telegram_id = ?", (user_id,)) as cur:
             u_row = await cur.fetchone()
-        async with db.execute("SELECT id, status FROM bots WHERE user_id = ?", (user_id,)) as cur:
+        async with db.execute("SELECT id FROM bots WHERE user_id = ?", (user_id,)) as cur:
             b_row = await cur.fetchone()
 
     points = u_row[0] if u_row else 0
     bot_cost = int(await get_setting("bot_cost", str(DEFAULT_BOT_COST)))
 
-    # Check 1 active bot limit
     if b_row:
-        await update.message.reply_html(
+        await update.effective_message.reply_html(
             "<b>❌ Active Bot Slot Full</b>\n\n"
-            "আপনার একটি Bot ইতিমধ্যে স্লটে যুক্ত আছে।\n"
-            "নতুন Bot deploy করতে হলে প্রথমে <b>'🤖 My Bot'</b> মেনু থেকে বর্তমান Bot মুছে ফেলুন।"
+            "আপনার একটি Bot ইতিমধ্যে স্লটে আছে।\n"
+            "নতুন Bot চালাতে হলে <b>'🤖 My Bot'</b> থেকে বর্তমান Bot ডিলিট করুন।"
         )
         return
 
-    # Check Points
     if points < bot_cost:
-        await update.message.reply_html(
+        await update.effective_message.reply_html(
             "<b>❌ Insufficient Points</b>\n\n"
             f"Bot Deploy করতে <b>{bot_cost} Points</b> প্রয়োজন।\n"
-            f"আপনার বর্তমান Balance: <b>{points} Points</b>\n\n"
-            "🎁 Referral করে অথবা 💰 Deposit করে ব্যালেন্স যোগ করুন।"
+            f"আপনার Balance: <b>{points} Points</b>\n\n"
+            "🎁 Referral করে অথবা 💰 Deposit করে ব্যালেন্স যুক্ত করুন।"
         )
         return
 
@@ -649,13 +608,12 @@ async def deploy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🟢 Node.js Bot (index.js)", callback_data="runtime_node")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")]
     ])
-    await update.message.reply_html(
+    await update.effective_message.reply_html(
         "<b>🤖 Select Bot Runtime</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "আপনার Bot-এর Runtime নির্বাচন করুন:\n\n"
-        "• <b>Python 3:</b> <code>bot.py</code> এবং optional <code>requirements.txt</code>\n"
-        "• <b>Node.js:</b> <code>index.js</code> এবং optional <code>package.json</code>\n\n"
-        f"💎 <b>Cost:</b> {bot_cost} Points (One-time slot setup)",
+        "• <b>Python 3:</b> <code>bot.py</code> (এবং requirements.txt)\n"
+        "• <b>Node.js:</b> <code>index.js</code> (এবং package.json)\n\n"
+        f"💎 <b>Cost:</b> {bot_cost} Points",
         reply_markup=kb
     )
 
@@ -667,12 +625,20 @@ async def my_bot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not row:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Deploy Bot Now", callback_data="btn_deploy")]])
-        await update.message.reply_html(
-            "<b>🤖 No Active Bot Found</b>\n\n"
-            "আপনি এখনো কোনো Bot ডিপ্লয় করেননি।\n"
-            "নিচের বাটনে ক্লিক করে সহজেই ডিপ্লয় করুন!",
-            reply_markup=kb
-        )
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(
+                "<b>🤖 No Active Bot Found</b>\n\n"
+                "আপনি এখনো কোনো Bot হোস্ট করেননি।",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
+        else:
+            await update.effective_message.reply_html(
+                "<b>🤖 No Active Bot Found</b>\n\n"
+                "আপনি এখনো কোনো Bot হোস্ট করেননি।",
+                reply_markup=kb
+            )
         return
 
     bot_id, runtime, status, main_file, created = row
@@ -687,23 +653,22 @@ async def my_bot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     text = (
-        "<b>🤖 My Bot Management</b>\n"
+        "<b>🤖 My Bot Dashboard</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>Status:</b> {status_emoji}\n"
         f"<b>Runtime:</b> <code>{runtime.upper()}</code>\n"
         f"<b>Entry File:</b> <code>{main_file}</code>\n"
         f"<b>Created:</b> {created}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "Control your live bot process using the buttons below:"
+        "━━━━━━━━━━━━━━━━━━"
     )
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        await update.message.reply_html(text, reply_markup=kb)
+        await update.effective_message.reply_html(text, reply_markup=kb)
 
 # ------------------------------------------------------------------------------
-# 9. GENERAL CALLBACK DISPATCHER (BOT ACTIONS & ADMIN)
+# 9. CALLBACK DISPATCHER
 # ------------------------------------------------------------------------------
 async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -738,14 +703,13 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer()
         await query.edit_message_text(
             f"<b>🟢 {runtime.upper()} Selected</b>\n\n"
-            f"এখন আপনার বট কোড ফাইল (<code>{main_file}</code>) অথবা সরাসরি টেক্সট মেসেজ আকারে সম্পূর্ণ কোডটি পাঠান।\n\n"
-            "💡 <i>আপনি একসাথে requirements.txt বা package.json ফাইলও পাঠাতে পারেন।</i>",
+            f"আপনার বট কোড ফাইল (<code>{main_file}</code>) অথবা সরাসরি টেক্সট মেসেজ আকারে কোডটি পাঠান।\n\n"
+            "💡 <i>ডকুমেন্ট আকারে ফাইল আপলোড করলে স্বয়ংক্রিয়ভাবে প্রজেক্টে যুক্ত হবে।</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=get_back_inline("cancel_action")
         )
         return
 
-    # Bot Action Handlers
     if data.startswith("botact_"):
         parts = data.split("_")
         action = parts[1]
@@ -756,7 +720,7 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
                 bot_info = await cur.fetchone()
 
         if not bot_info or (bot_info[1] != user_id and user_id != ADMIN_ID):
-            await query.answer("Bot not found or unauthorized.", show_alert=True)
+            await query.answer("Unauthorized.", show_alert=True)
             return
 
         b_id, u_id, runtime, main_file = bot_info
@@ -778,13 +742,12 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
             await BotRunner.stop_bot(b_id)
             await asyncio.sleep(1)
             ok, msg = await BotRunner.start_bot(b_id, u_id, runtime, main_file)
-            await query.answer("Restarted successfully!" if ok else f"Failed: {msg}", show_alert=not ok)
+            await query.answer("Restarted!" if ok else f"Failed: {msg}", show_alert=not ok)
             await my_bot_handler(update, context)
 
         elif action == "logs":
             await query.answer()
             logs = BotRunner.get_logs(u_id, max_lines=35)
-            # Truncate to avoid Telegram limits
             if len(logs) > 3500:
                 logs = logs[-3500:]
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Logs", callback_data=f"botact_logs_{bot_id}"),
@@ -797,23 +760,21 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         elif action == "confirmdel":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑 Yes, Permanently Delete", callback_data=f"botact_dodelete_{bot_id}")],
+                [InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"botact_dodelete_{bot_id}")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="menu_mybot")]
             ])
             await query.edit_message_text(
                 "<b>⚠️ Delete Bot Confirmation</b>\n\n"
-                "Are you sure you want to completely delete your bot and its files?\n"
-                "<i>This action cannot be undone.</i>",
+                "Are you sure you want to permanently delete your bot?",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb
             )
 
         elif action == "dodelete":
             await BotRunner.delete_bot(b_id, u_id)
-            await query.answer("Bot deleted successfully.", show_alert=True)
-            await query.edit_message_text("<b>🗑 Bot and project files permanently removed.</b>", parse_mode=ParseMode.HTML)
+            await query.answer("Deleted.", show_alert=True)
+            await query.edit_message_text("<b>🗑 Bot permanently deleted.</b>", parse_mode=ParseMode.HTML)
 
-    # Admin Deposit Approval / Rejection
     elif data.startswith("adm_dep_"):
         if user_id != ADMIN_ID:
             await query.answer("Unauthorized.", show_alert=True)
@@ -828,7 +789,7 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
                 dep_row = await cur.fetchone()
 
         if not dep_row:
-            await query.answer("Deposit request not found.", show_alert=True)
+            await query.answer("Deposit not found.", show_alert=True)
             return
 
         target_uid, amount, pts, trx, status = dep_row
@@ -849,9 +810,8 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
                     chat_id=target_uid,
                     text=f"<b>✅ Deposit Approved!</b>\n\n"
                          f"💵 <b>Amount:</b> ৳{amount}\n"
-                         f"💎 <b>Added Points:</b> +{pts} Points\n"
-                         f"🧾 <b>TrxID:</b> <code>{trx}</code>\n\n"
-                         f"You can now use your points to deploy your bot.",
+                         f"💎 <b>Points:</b> +{pts} Points\n"
+                         f"🧾 <b>TrxID:</b> <code>{trx}</code>",
                     parse_mode=ParseMode.HTML
                 )
             except Exception:
@@ -859,16 +819,14 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         elif decision == "rej":
             async with aiosqlite.connect(DATABASE_PATH) as db:
-                await db.execute("UPDATE deposits SET status = 'rejected', admin_id = ?, rejection_reason = 'Payment could not be verified' WHERE id = ?", (user_id, dep_id))
+                await db.execute("UPDATE deposits SET status = 'rejected', admin_id = ?, rejection_reason = 'Invalid TrxID' WHERE id = ?", (user_id, dep_id))
                 await db.commit()
 
             await query.edit_message_text(f"<b>❌ Deposit #{dep_id} Rejected.</b>", parse_mode=ParseMode.HTML)
             try:
                 await context.bot.send_message(
                     chat_id=target_uid,
-                    text=f"<b>❌ Deposit Rejected</b>\n\n"
-                         f"Your deposit request for <b>৳{amount}</b> (Trx: <code>{trx}</code>) was rejected by Admin.\n"
-                         f"Please contact 🆘 Support if you believe this is a mistake.",
+                    text=f"<b>❌ Deposit Rejected</b>\n\nYour deposit of <b>৳{amount}</b> was rejected.",
                     parse_mode=ParseMode.HTML
                 )
             except Exception:
@@ -878,7 +836,7 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
         await my_bot_handler(update, context)
 
 # ------------------------------------------------------------------------------
-# 10. TEXT & DOCUMENT MESSAGE HANDLER (CODE UPLOAD & STATES)
+# 10. MESSAGE HANDLER (FIXED FILE & TEXT DISPATCH)
 # ------------------------------------------------------------------------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -887,7 +845,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     state_data = USER_STATES.get(user.id)
 
-    # 1. Main Keyboard Reply Buttons Dispatch
+    # 1. Main Keyboard Reply Buttons
     if text == "🚀 Deploy Bot":
         await deploy_menu(update, context)
         return
@@ -916,123 +874,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_panel_handler(update, context)
         return
 
-    # 2. State Management Dispatch
-    if state_data:
-        state = state_data.get("state")
+    # 2. Document Uploads (Highest priority if file attached)
+    if update.message.document:
+        doc = update.message.document
+        filename = doc.file_name or "bot.py"
+        user_dir = BotRunner.get_user_dir(user.id)
+        file_obj = await context.bot.get_file(doc.file_id)
+        dest_path = os.path.join(user_dir, filename)
+        await file_obj.download_to_drive(dest_path)
 
-        # Custom Deposit Amount Input
-        if state == "AWAITING_DEP_CUSTOM_AMOUNT":
-            try:
-                amt = float(text.strip())
-                if amt <= 0:
-                    raise ValueError
-                state_data["amount"] = amt
-                state_data["state"] = "AWAITING_DEP_TRX"
-                await update.message.reply_html(
-                    f"💵 <b>Amount Set:</b> ৳{amt}\n"
-                    f"💳 <b>Method:</b> {state_data['method']}\n\n"
-                    "🧾 <b>Please enter your Transaction ID (TrxID):</b>"
-                )
-            except ValueError:
-                await update.message.reply_text("❌ Please enter a valid number (e.g. 150).")
-            return
-
-        # Deposit Transaction ID Submission
-        if state == "AWAITING_DEP_TRX":
-            trx = text.strip().upper()
-            if len(trx) < 4:
-                await update.message.reply_text("❌ Please enter a valid Transaction ID.")
-                return
-
-            method = state_data["method"]
-            amount = state_data["amount"]
-            points = int(amount)  # 1 BDT = 1 Point
-
-            async with aiosqlite.connect(DATABASE_PATH) as db:
-                # Check duplicate TxID
-                async with db.execute("SELECT id FROM deposits WHERE transaction_id = ?", (trx,)) as cur:
-                    dup = await cur.fetchone()
-                if dup:
-                    await update.message.reply_html("<b>⚠️ This Transaction ID has already been submitted.</b>")
-                    USER_STATES.pop(user.id, None)
-                    return
-
-                await db.execute(
-                    "INSERT INTO deposits (user_id, method, amount, points, transaction_id, status) VALUES (?, ?, ?, ?, ?, 'pending')",
-                    (user.id, method, amount, points, trx)
-                )
-                await db.commit()
-                async with db.execute("SELECT last_insert_rowid()") as cur:
-                    dep_id = (await cur.fetchone())[0]
-
-            USER_STATES.pop(user.id, None)
-            await update.message.reply_html(
-                "<b>⏳ Deposit Request Submitted!</b>\n\n"
-                f"🧾 <b>Transaction ID:</b> <code>{trx}</code>\n"
-                f"💵 <b>Amount:</b> ৳{amount}\n"
-                f"💎 <b>Points to receive:</b> {points}\n\n"
-                "<i>Your request has been forwarded to the Admin for manual verification.</i>"
-            )
-
-            # Notify Admin
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Approve", callback_data=f"adm_dep_app_{dep_id}"),
-                 InlineKeyboardButton("❌ Reject", callback_data=f"adm_dep_rej_{dep_id}")]
-            ])
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"<b>💰 New Deposit Request (#{dep_id})</b>\n"
-                         f"━━━━━━━━━━━━━━━━━━\n"
-                         f"👤 <b>User:</b> @{user.username or 'None'} (<code>{user.id}</code>)\n"
-                         f"💳 <b>Method:</b> {method}\n"
-                         f"💵 <b>Amount:</b> ৳{amount} ({points} Points)\n"
-                         f"🧾 <b>TrxID:</b> <code>{trx}</code>\n"
-                         f"━━━━━━━━━━━━━━━━━━",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=kb
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin of deposit: {e}")
-            return
-
-        # Support Message Input
-        if state == "AWAITING_SUPPORT_MSG":
-            USER_STATES.pop(user.id, None)
-            async with aiosqlite.connect(DATABASE_PATH) as db:
-                await db.execute("INSERT INTO support_tickets (user_id, message) VALUES (?, ?)", (user.id, text))
-                await db.commit()
-                async with db.execute("SELECT last_insert_rowid()") as cur:
-                    ticket_id = (await cur.fetchone())[0]
-
-            await update.message.reply_html(
-                f"<b>🎫 Support Ticket #{ticket_id} Created</b>\n\n"
-                "Your query has been sent to our Admin team. You will receive a response shortly."
-            )
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"<b>🆘 New Support Ticket #{ticket_id}</b>\n\n"
-                         f"👤 <b>From:</b> @{user.username or 'None'} (<code>{user.id}</code>)\n"
-                         f"📝 <b>Message:</b>\n{text}\n\n"
-                         f"<i>To reply send:</i> <code>/reply {ticket_id} Your message</code>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-            return
-
-        # Code Uploading (via Text)
-        if state == "AWAITING_CODE_FILE":
+        if state_data and state_data.get("state") == "AWAITING_CODE_FILE":
             runtime = state_data["runtime"]
             main_file = "bot.py" if runtime == "python" else "index.js"
-            user_dir = BotRunner.get_user_dir(user.id)
-            code_path = os.path.join(user_dir, main_file)
+            if filename in ["bot.py", "index.js", "main.py", "app.js", "server.js"]:
+                main_file = filename
 
-            with open(code_path, "w", encoding="utf-8") as f:
-                f.write(text)
-
-            # Deduct points & create DB record
             bot_cost = int(await get_setting("bot_cost", str(DEFAULT_BOT_COST)))
             async with aiosqlite.connect(DATABASE_PATH) as db:
                 await db.execute("UPDATE users SET points = points - ? WHERE telegram_id = ?", (bot_cost, user.id))
@@ -1045,57 +901,141 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     bot_id = (await cur.fetchone())[0]
 
             USER_STATES.pop(user.id, None)
-            # Automatically start bot
             ok, msg = await BotRunner.start_bot(bot_id, user.id, runtime, main_file)
-            await update.message.reply_html(
-                f"<b>🚀 Bot Deployed Successfully!</b>\n\n"
-                f"💎 <b>Cost:</b> -{bot_cost} Points\n"
-                f"🟢 <b>Status:</b> {'Running' if ok else 'Stopped (Check logs)'}\n\n"
-                "Use <b>'🤖 My Bot'</b> to control your bot anytime."
+            await update.effective_message.reply_html(
+                f"<b>📁 File <code>{filename}</code> deployed!</b>\n\n"
+                f"💎 <b>Deducted:</b> {bot_cost} Points\n"
+                f"🟢 <b>Status:</b> {'Running' if ok else 'Stopped (Check Logs)'}"
             )
             return
 
-    # Document Upload Handling (e.g. user sends bot.py, requirements.txt, index.js, package.json)
-    if update.message.document:
-        doc = update.message.document
-        filename = doc.file_name
-        user_dir = BotRunner.get_user_dir(user.id)
-        file_obj = await context.bot.get_file(doc.file_id)
-        dest_path = os.path.join(user_dir, filename)
-        await file_obj.download_to_drive(dest_path)
+        await update.effective_message.reply_html(f"✅ File <code>{filename}</code> saved to your project folder.")
+        return
 
-        if state_data and state_data.get("state") == "AWAITING_CODE_FILE":
+    # 3. FSM State Processing (Text Inputs)
+    if state_data:
+        state = state_data.get("state")
+
+        if state == "AWAITING_DEP_CUSTOM_AMOUNT":
+            try:
+                amt = float(text.strip())
+                if amt <= 0:
+                    raise ValueError
+                state_data["amount"] = amt
+                state_data["state"] = "AWAITING_DEP_TRX"
+                await update.effective_message.reply_html(
+                    f"💵 <b>Amount:</b> ৳{amt}\n"
+                    f"💳 <b>Method:</b> {state_data['method']}\n\n"
+                    "🧾 <b>Please send your Transaction ID:</b>"
+                )
+            except ValueError:
+                await update.effective_message.reply_text("❌ Please enter a valid positive number.")
+            return
+
+        if state == "AWAITING_DEP_TRX":
+            trx = text.strip().upper()
+            if len(trx) < 4:
+                await update.effective_message.reply_text("❌ Invalid Transaction ID.")
+                return
+
+            method = state_data["method"]
+            amount = state_data["amount"]
+            points = int(amount)
+
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                async with db.execute("SELECT id FROM deposits WHERE transaction_id = ?", (trx,)) as cur:
+                    dup = await cur.fetchone()
+                if dup:
+                    await update.effective_message.reply_html("<b>⚠️ This Transaction ID is already submitted.</b>")
+                    USER_STATES.pop(user.id, None)
+                    return
+
+                await db.execute(
+                    "INSERT INTO deposits (user_id, method, amount, points, transaction_id, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+                    (user.id, method, amount, points, trx)
+                )
+                await db.commit()
+                async with db.execute("SELECT last_insert_rowid()") as cur:
+                    dep_id = (await cur.fetchone())[0]
+
+            USER_STATES.pop(user.id, None)
+            await update.effective_message.reply_html(
+                "<b>⏳ Deposit Submitted!</b>\n\n"
+                f"🧾 <b>Transaction ID:</b> <code>{trx}</code>\n"
+                f"💵 <b>Amount:</b> ৳{amount} ({points} Points)\n\n"
+                "<i>Admin will verify your payment shortly.</i>"
+            )
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Approve", callback_data=f"adm_dep_app_{dep_id}"),
+                 InlineKeyboardButton("❌ Reject", callback_data=f"adm_dep_rej_{dep_id}")]
+            ])
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"<b>💰 New Deposit (#{dep_id})</b>\n"
+                         f"👤 @{user.username or 'None'} (<code>{user.id}</code>)\n"
+                         f"💳 {method} | ৳{amount} ({points} Pts)\n"
+                         f"🧾 Trx: <code>{trx}</code>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb
+                )
+            except Exception:
+                pass
+            return
+
+        if state == "AWAITING_SUPPORT_MSG":
+            USER_STATES.pop(user.id, None)
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                await db.execute("INSERT INTO support_tickets (user_id, message) VALUES (?, ?)", (user.id, text))
+                await db.commit()
+                async with db.execute("SELECT last_insert_rowid()") as cur:
+                    ticket_id = (await cur.fetchone())[0]
+
+            await update.effective_message.reply_html(f"<b>🎫 Support Ticket #{ticket_id} Created</b>\nAdmin has been notified.")
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"<b>🆘 Ticket #{ticket_id}</b> from @{user.username or 'None'} (<code>{user.id}</code>):\n\n{text}\n\n"
+                         f"Reply: <code>/reply {ticket_id} [Your Reply]</code>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+            return
+
+        if state == "AWAITING_CODE_FILE" and text:
             runtime = state_data["runtime"]
             main_file = "bot.py" if runtime == "python" else "index.js"
-            
-            # If they uploaded main file
-            if filename in ["bot.py", "index.js", "main.py", "app.js"]:
-                main_file = filename
-                bot_cost = int(await get_setting("bot_cost", str(DEFAULT_BOT_COST)))
-                async with aiosqlite.connect(DATABASE_PATH) as db:
-                    await db.execute("UPDATE users SET points = points - ? WHERE telegram_id = ?", (bot_cost, user.id))
-                    await db.execute(
-                        "INSERT OR REPLACE INTO bots (user_id, runtime, status, project_dir, main_file) VALUES (?, ?, 'stopped', ?, ?)",
-                        (user.id, runtime, user_dir, main_file)
-                    )
-                    await db.commit()
-                    async with db.execute("SELECT id FROM bots WHERE user_id = ?", (user.id,)) as cur:
-                        bot_id = (await cur.fetchone())[0]
+            user_dir = BotRunner.get_user_dir(user.id)
+            code_path = os.path.join(user_dir, main_file)
 
-                USER_STATES.pop(user.id, None)
-                ok, msg = await BotRunner.start_bot(bot_id, user.id, runtime, main_file)
-                await update.message.reply_html(
-                    f"<b>📁 File <code>{filename}</code> received and deployed!</b>\n\n"
-                    f"💎 <b>Deducted:</b> {bot_cost} Points\n"
-                    f"🟢 <b>Status:</b> {'Running' if ok else 'Stopped'}\n\n"
-                    "Manage your bot via <b>'🤖 My Bot'</b>."
+            with open(code_path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+            bot_cost = int(await get_setting("bot_cost", str(DEFAULT_BOT_COST)))
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                await db.execute("UPDATE users SET points = points - ? WHERE telegram_id = ?", (bot_cost, user.id))
+                await db.execute(
+                    "INSERT OR REPLACE INTO bots (user_id, runtime, status, project_dir, main_file) VALUES (?, ?, 'stopped', ?, ?)",
+                    (user.id, runtime, user_dir, main_file)
                 )
-                return
-        
-        await update.message.reply_html(f"✅ File <code>{filename}</code> saved to your project directory.")
+                await db.commit()
+                async with db.execute("SELECT id FROM bots WHERE user_id = ?", (user.id,)) as cur:
+                    bot_id = (await cur.fetchone())[0]
+
+            USER_STATES.pop(user.id, None)
+            ok, msg = await BotRunner.start_bot(bot_id, user.id, runtime, main_file)
+            await update.effective_message.reply_html(
+                f"<b>🚀 Bot Deployed!</b>\n\n"
+                f"💎 <b>Deducted:</b> {bot_cost} Points\n"
+                f"🟢 <b>Status:</b> {'Running' if ok else 'Stopped'}\n\n"
+                "Manage using <b>'🤖 My Bot'</b>."
+            )
+            return
 
 # ------------------------------------------------------------------------------
-# 11. STATISTICS, SUPPORT & ADMIN CONTROL PANEL
+# 11. STATS, SUPPORT & ADMIN
 # ------------------------------------------------------------------------------
 async def statistics_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -1113,20 +1053,17 @@ async def statistics_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 <b>Total Users:</b> <code>{total_users}</code>\n"
         f"🤖 <b>Running Bots:</b> <code>{running_bots}</code>\n"
-        f"📦 <b>Total Deployed Bots:</b> <code>{total_bots}</code>\n"
-        f"💰 <b>Total Verified Deposits:</b> ৳<code>{total_deposits:.2f}</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "⚡ <i>High performance cloud hosting powered by CodeHost.</i>"
+        f"📦 <b>Total Deployed:</b> <code>{total_bots}</code>\n"
+        f"💰 <b>Total Deposits:</b> ৳<code>{total_deposits:.2f}</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━"
     )
-    await update.message.reply_html(text)
+    await update.effective_message.reply_html(text)
 
 async def support_prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     USER_STATES[update.effective_user.id] = {"state": "AWAITING_SUPPORT_MSG"}
-    await update.message.reply_html(
-        "<b>🆘 CodeHost 24/7 Support</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "অনুগ্রহ করে আপনার সমস্যা বা প্রশ্ন বিস্তারিত লিখে মেসেজ পাঠান।\n"
-        "আমাদের সাপোর্ট টিম দ্রুত আপনার সাথে যোগাযোগ করবে।",
+    await update.effective_message.reply_html(
+        "<b>🆘 CodeHost Support</b>\n\n"
+        "আপনার সমস্যা বা মেসেজটি লিখে পাঠান, এডমিন রিপ্লাই দেবে।",
         reply_markup=get_back_inline("cancel_action")
     )
 
@@ -1139,29 +1076,19 @@ async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             u_count = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM deposits WHERE status = 'pending'") as cur:
             p_dep = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM support_tickets WHERE status = 'open'") as cur:
-            o_sup = (await cur.fetchone())[0]
 
     text = (
         "<b>⚙️ ADMIN CONTROL PANEL</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 <b>Total Users:</b> {u_count}\n"
-        f"🟡 <b>Pending Deposits:</b> {p_dep}\n"
-        f"🎫 <b>Open Support Tickets:</b> {o_sup}\n\n"
-        "<b>Admin Commands:</b>\n"
-        "• <code>/addpoints [user_id] [points]</code> - Add points\n"
-        "• <code>/rempoints [user_id] [points]</code> - Deduct points\n"
-        "• <code>/ban [user_id]</code> - Ban user\n"
-        "• <code>/unban [user_id]</code> - Unban user\n"
-        "• <code>/broadcast [message]</code> - Broadcast to all\n"
-        "• <code>/reply [ticket_id] [message]</code> - Reply to support\n"
-        "• <code>/maintenance [1 or 0]</code> - Toggle Maintenance\n"
+        f"👥 <b>Users:</b> {u_count} | 🟡 <b>Pending Deposits:</b> {p_dep}\n\n"
+        "<b>Commands:</b>\n"
+        "• <code>/addpoints [user_id] [points]</code>\n"
+        "• <code>/broadcast [message]</code>\n"
+        "• <code>/reply [ticket_id] [message]</code>\n"
+        "• <code>/maintenance [1/0]</code>"
     )
-    await update.message.reply_html(text)
+    await update.effective_message.reply_html(text)
 
-# ------------------------------------------------------------------------------
-# 12. ADMIN COMMANDS IMPLEMENTATION
-# ------------------------------------------------------------------------------
 async def admin_add_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1171,20 +1098,20 @@ async def admin_add_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE users SET points = points + ? WHERE telegram_id = ?", (pts, target_id))
             await db.commit()
-        await update.message.reply_text(f"✅ Added {pts} points to user {target_id}.")
+        await update.effective_message.reply_text(f"✅ Added {pts} points to user {target_id}.")
         try:
             await context.bot.send_message(target_id, f"💎 Admin added <b>+{pts} Points</b> to your balance!", parse_mode=ParseMode.HTML)
         except Exception:
             pass
     except Exception as e:
-        await update.message.reply_text(f"Usage: /addpoints [user_id] [points]\nError: {e}")
+        await update.effective_message.reply_text(f"Error: {e}")
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     msg = " ".join(context.args)
     if not msg:
-        await update.message.reply_text("Usage: /broadcast [Your message]")
+        await update.effective_message.reply_text("Usage: /broadcast [Message]")
         return
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -1192,20 +1119,16 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users = await cur.fetchall()
 
     success, fail = 0, 0
-    await update.message.reply_text(f"📢 Starting broadcast to {len(users)} users...")
+    await update.effective_message.reply_text(f"📢 Broadcasting to {len(users)} users...")
     for u in users:
         try:
-            await context.bot.send_message(
-                chat_id=u[0],
-                text=f"<b>📢 Announcement from Admin:</b>\n\n{msg}",
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=u[0], text=f"<b>📢 Announcement:</b>\n\n{msg}", parse_mode=ParseMode.HTML)
             success += 1
-            await asyncio.sleep(0.05)  # Telegram rate-limit mitigation
+            await asyncio.sleep(0.05)
         except Exception:
             fail += 1
 
-    await update.message.reply_text(f"✅ Broadcast Completed!\nSuccess: {success}\nFailed: {fail}")
+    await update.effective_message.reply_text(f"✅ Broadcast Completed!\nSuccess: {success}, Failed: {fail}")
 
 async def admin_reply_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -1217,22 +1140,21 @@ async def admin_reply_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE)
             async with db.execute("SELECT user_id, message FROM support_tickets WHERE id = ?", (ticket_id,)) as cur:
                 row = await cur.fetchone()
             if not row:
-                await update.message.reply_text("Ticket not found.")
+                await update.effective_message.reply_text("Ticket not found.")
                 return
             await db.execute("UPDATE support_tickets SET reply = ?, status = 'closed' WHERE id = ?", (reply_msg, ticket_id))
             await db.commit()
 
-        target_uid = row[0]
         await context.bot.send_message(
-            chat_id=target_uid,
+            chat_id=row[0],
             text=f"<b>🆘 Support Reply (Ticket #{ticket_id})</b>\n\n"
-                 f"📝 <b>Your Issue:</b> {row[1]}\n\n"
-                 f"👨‍💼 <b>Admin Response:</b>\n{reply_msg}",
+                 f"📝 <b>Issue:</b> {row[1]}\n\n"
+                 f"👨‍💼 <b>Admin:</b> {reply_msg}",
             parse_mode=ParseMode.HTML
         )
-        await update.message.reply_text(f"✅ Reply sent for Ticket #{ticket_id}.")
+        await update.effective_message.reply_text(f"✅ Reply sent for Ticket #{ticket_id}.")
     except Exception as e:
-        await update.message.reply_text(f"Usage: /reply [ticket_id] [message]\nError: {e}")
+        await update.effective_message.reply_text(f"Error: {e}")
 
 async def admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -1241,14 +1163,12 @@ async def admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = context.args[0]
         if val in ["0", "1"]:
             await set_setting("maintenance_mode", val)
-            await update.message.reply_text(f"✅ Maintenance Mode set to: {'ON' if val == '1' else 'OFF'}")
-        else:
-            await update.message.reply_text("Usage: /maintenance 1 (ON) or /maintenance 0 (OFF)")
+            await update.effective_message.reply_text(f"✅ Maintenance Mode: {'ON' if val == '1' else 'OFF'}")
     except Exception:
-        await update.message.reply_text("Usage: /maintenance 1 or /maintenance 0")
+        await update.effective_message.reply_text("Usage: /maintenance 1 or 0")
 
 # ------------------------------------------------------------------------------
-# 13. RENDER HEALTH CHECK HTTP SERVER
+# 12. RENDER HEALTH CHECK HTTP SERVER
 # ------------------------------------------------------------------------------
 async def health_check_handler(request):
     return web.Response(text="CodeHost Telegram Bot Platform is Running 24/7!", status=200)
@@ -1261,19 +1181,16 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"Healthcheck Web Server running on port {PORT}")
+    logger.info(f"Healthcheck Web Server started on port {PORT}")
 
 # ------------------------------------------------------------------------------
-# 14. MAIN ENTRY POINT & BOT INITIALIZATION
+# 13. MAIN ASYNC ENTRY POINT
 # ------------------------------------------------------------------------------
-def main():
-    # Run DB init synchronously before launching loop
-    asyncio.run(init_db())
+async def run_platform():
+    await init_db()
 
-    # Build Telegram Bot Application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("addpoints", admin_add_points))
     application.add_handler(CommandHandler("broadcast", admin_broadcast))
@@ -1284,14 +1201,21 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_dispatcher))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_handler))
 
-    # Background tasks: Start Healthcheck HTTP Server
-    async def post_init(app):
-        asyncio.create_task(start_web_server())
+    await start_web_server()
 
-    application.post_init = post_init
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    logger.info(f"🚀 CodeHost Bot successfully started for @{BOT_USERNAME}. Listening for updates...")
 
-    logger.info(f"🚀 CodeHost Bot started for @{BOT_USERNAME}. Polling...")
-    application.run_polling(drop_pending_updates=True)
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
+
+def main():
+    try:
+        asyncio.run(run_platform())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutting down gracefully.")
 
 if __name__ == "__main__":
     main()
